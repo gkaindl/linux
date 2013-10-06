@@ -60,6 +60,30 @@
 #define USBTV_ODD(chunk)	((be32_to_cpu(chunk[0]) & 0x0000f000) >> 15)
 #define USBTV_CHUNK_NO(chunk)	(be32_to_cpu(chunk[0]) & 0x00000fff)
 
+#define USBTV_TV_STD	(V4L2_STD_525_60 | V4L2_STD_625_50)
+
+/* parameters for supported TV norms */
+struct usbtv_norm_params {
+	v4l2_std_id norm;
+	int cap_width, cap_height;
+	int num_chunks;
+};
+
+static struct usbtv_norm_params norm_params[] = {
+	{
+		.norm = V4L2_STD_525_60,
+		.cap_width = 720,
+		.cap_height = 480,
+		.num_chunks = 720 * 480 / 4 / USBTV_CHUNK
+	},
+	{
+		.norm = V4L2_STD_625_50,
+		.cap_width = 720,
+		.cap_height = 576,
+		.num_chunks = 720 * 576 / 4 / USBTV_CHUNK
+	}
+};
+
 /* A single videobuf2 frame buffer. */
 struct usbtv_buf {
 	struct vb2_buffer vb;
@@ -97,16 +121,27 @@ struct usbtv {
 	struct urb *isoc_urbs[USBTV_ISOC_TRANSFERS];
 };
 
-static int usbtv_num_chunks_for_norm(v4l2_std_id norm)
+static int usbtv_configure_for_norm(struct usbtv *usbtv, v4l2_std_id norm)
 {
-	int n_chunks = -1;
+	int i, ret = 0;
+	struct usbtv_norm_params *params = NULL;
+	
+	for (i = 0; i < ARRAY_SIZE(norm_params); i++) {
+		if (norm_params[i].norm & norm) {
+			params = &norm_params[i];
+			break;
+		}
+	}
 
-	if (norm & V4L2_STD_525_60)
-		n_chunks = 720 * 480 / 4 / USBTV_CHUNK;
-	else if (norm & V4L2_STD_625_50)
-		n_chunks = 720 * 576 / 4 / USBTV_CHUNK;
+	if (params) {
+		usbtv->width = params->cap_width;
+		usbtv->height = params->cap_height;
+		usbtv->n_chunks = params->num_chunks;
+		usbtv->norm = params->norm;
+	} else
+		ret = -EINVAL;
 
-	return n_chunks;
+	return ret;
 }
 
 static int usbtv_set_regs(struct usbtv *usbtv, const u16 regs[][2], int size)
@@ -207,24 +242,13 @@ static int usbtv_select_norm(struct usbtv *usbtv, v4l2_std_id norm)
 		{ USBTV_BASE + 0x0267, 0x0005 }
 	};
 
-	ret = -EINVAL;
-
-	if (norm & V4L2_STD_525_60)
-		ret = usbtv_set_regs(usbtv, ntsc, ARRAY_SIZE(ntsc));
-	else if (norm & V4L2_STD_625_50)
-		ret = usbtv_set_regs(usbtv, pal, ARRAY_SIZE(pal));
+	ret = usbtv_configure_for_norm(usbtv, norm);
 
 	if (!ret) {
-		usbtv->norm = norm;
-		usbtv->n_chunks = usbtv_num_chunks_for_norm(norm);
-
-		if (norm & V4L2_STD_525_60) {
-			usbtv->width = 720;
-			usbtv->height = 480;
-		} else if (norm & V4L2_STD_625_50) {
-			usbtv->width = 720;
-			usbtv->height = 576;
-		}
+		if (norm & V4L2_STD_525_60)
+			ret = usbtv_set_regs(usbtv, ntsc, ARRAY_SIZE(ntsc));
+		else if (norm & V4L2_STD_625_50)
+			ret = usbtv_set_regs(usbtv, pal, ARRAY_SIZE(pal));
 	}
 
 	return ret;
@@ -765,10 +789,7 @@ static int usbtv_probe(struct usb_interface *intf,
 
 	usbtv->iso_size = size;
 
-	usbtv->norm = V4L2_STD_525_60;
-	usbtv->width = 720;
-	usbtv->height = 480;
-	usbtv->n_chunks = usbtv_num_chunks_for_norm(usbtv->norm);
+	(void)usbtv_configure_for_norm(usbtv, V4L2_STD_525_60);
 
 	spin_lock_init(&usbtv->buflock);
 	mutex_init(&usbtv->v4l2_lock);
@@ -806,7 +827,7 @@ static int usbtv_probe(struct usb_interface *intf,
 	usbtv->vdev.release = video_device_release_empty;
 	usbtv->vdev.fops = &usbtv_fops;
 	usbtv->vdev.ioctl_ops = &usbtv_ioctl_ops;
-	usbtv->vdev.tvnorms = V4L2_STD_525_60 | V4L2_STD_625_50;
+	usbtv->vdev.tvnorms = USBTV_TV_STD;
 	usbtv->vdev.queue = &usbtv->vb2q;
 	usbtv->vdev.lock = &usbtv->v4l2_lock;
 	set_bit(V4L2_FL_USE_FH_PRIO, &usbtv->vdev.flags);
